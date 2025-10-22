@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Домашний Планировщик | 2 Недели</title>
+    <!-- Загрузка Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Шрифт Inter -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+        .task-card {
+            transition: all 0.3s ease;
+        }
+        .task-card.completed {
+            background-color: #ecfdf5; /* Tailwind green-50 */
+            border-left: 5px solid #10b981; /* Tailwind emerald-500 */
+        }
+        .task-card.completed .task-text {
+            text-decoration: line-through;
+            color: #6b7280; /* Tailwind gray-500 */
+        }
+    </style>
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, query, where, getDocs, writeBatch, updateDoc, orderBy, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Глобальные переменные Firebase
+        let db;
+        let auth;
+        let userId;
+        let appId;
+        let tasksRef;
+        let initialTasksLoaded = false;
+
+        // Настройки логирования (для отладки)
+        setLogLevel('Debug');
+
+        // Глобальные переменные Canvas (ОБЯЗАТЕЛЬНЫ К ИСПОЛЬЗОВАНИЮ)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        appId = typeof __app_id !== 'undefined' ? __app_id : 'default-task-app';
+
+        // Инициализация Firebase и Аутентификация
+        async function initFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase config is missing!");
+                return;
+            }
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            tasksRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'task_list');
+
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                    // Обновляем отображение ID пользователя
+                    const userIdDisplay = document.getElementById('user-id-display');
+                    if (userIdDisplay) {
+                        userIdDisplay.textContent = `ID: ${userId}`;
+                    }
+                    console.log("Authenticated with UID:", userId);
+                    await setupInitialTasks();
+                    setupRealtimeListener();
+                } else {
+                    // Анонимный вход, если нет токена, или токен не сработал
+                    if (initialAuthToken) {
+                        try {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } catch (error) {
+                            console.error("Custom token sign-in failed. Signing in anonymously.", error);
+                            await signInAnonymously(auth);
+                        }
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                }
+            });
+        }
+
+        // 1. План Задач (преобразованный в JS-объект)
+        // Структура: [ [День, [ {секция, [задачи]} ] ] ]
+        const taskPlan = [
+            ['СРЕДА 22 ОКТЯБРЯ (вечерняя подготовка)', [
+                { section: 'Вечер', tasks: [
+                    'Постирать и погладить школьную форму Жени',
+                    'Подготовить чистые: трусики, белые/серые колготки, белые носочки',
+                    'Расчесать Женю и заплести косичку на ночь',
+                    'Проверить рюкзак: учебник по окружающему миру',
+                    'ПАКЕТ С РАБОТАМИ ИЗ ХУД.ШКОЛЫ У ВХОДНОЙ ДВЕРИ!',
+                    'Купить продукты на четверг'
+                ]}
+            ]],
+            ['ЧЕТВЕРГ 23 ОКТЯБРЯ (учебный день, СТАРТ)', [
+                { section: 'Утро', tasks: [
+                    '6:30 - Подъём и сборы Жени',
+                    'Подготовить чай сладкий и перекус (яблоко/йогурт/сырники)',
+                    '6:45 - Отдать Жене пакет с работами! Динара забирает',
+                    '9:00 - Полина отвозит Васю в садик'
+                ]},
+                { section: 'День', tasks: [
+                    'КУПИТЬ КАНЦЕЛЯРИЮ (маркеры 5шт срочно!)',
+                    'Стирка детских вещей',
+                    'Обед',
+                    'Свободное время с Женей',
+                    'Час ребёнка',
+                    'Зарядка для глаз Жене'
+                ]},
+                { section: 'После обеда', tasks: [
+                    '16:00 - Выехать к школе (30 мин)',
+                    '16:30 - Позвонить Елене Владимировне (89037782450)',
+                    '16:45 - Забрать Женю из школы',
+                    'В машине: Зарядка для глаз + "Вопрос дня"',
+                    '17:15 - Приехать домой, покормить Женю (макароны/слайсы/сосиски/наггетсы)',
+                    'Час ребёнка с Женей'
+                ]},
+                { section: 'Вечер', tasks: [
+                    '17:45 - Выехать в садик (35 мин)',
+                    '18:20 - Забрать Васю',
+                    '18:55 - Приехать домой',
+                    '19:00 - Ужин',
+                    'Упражнение УГОЛОК с Васей (10 раз)',
+                    '21:00 - Уложить детей',
+                    'Подготовить одежду на пятницу: футболка, белые носочки (физкультура!)'
+                ]}
+            ]],
+            ['ПЯТНИЦА 24 ОКТЯБРЯ (учебный день)', [
+                { section: 'Утро', tasks: [
+                    '6:30 - Подъём',
+                    'Подготовить чай сладкий и перекус (яблоко/йогурт/сырники)',
+                    '6:45 - МАРКЕР В РЮКЗАК! Динара забирает Женю',
+                    '9:00 - Полина отвозит Васю'
+                ]},
+                { section: 'День', tasks: [
+                    'Купить канцелярию (если не купили)',
+                    'Проверить родительские чаты'
+                ]},
+                { section: 'После обеда', tasks: [
+                    '16:00 - Выехать к школе (30 мин)',
+                    '16:30 - Позвонить Елене Владимировне (89037782450)',
+                    '16:45 - Забрать Женю из школы',
+                    'В машине: Зарядка для глаз + "Вопрос дня"',
+                    '17:15 - Приехать домой, покормить Женю (макароны/слайсы/сосиски/наггетсы)',
+                    'Час ребёнка с Женей',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '18:55 - Приехать домой'
+                ]},
+                { section: 'Вечер', tasks: [
+                    'Упражнение УГОЛОК',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['СУББОТА 25 ОКТЯБРЯ (выходной)', [
+                { section: 'Утро/День', tasks: [
+                    'Завтрак',
+                    'Проверить д/з - доделать, если что-то осталось',
+                    'Обед',
+                    'Дневной сон Васи',
+                    'Час ребёнка с Женей',
+                    'Упражнение УГОЛОК с Васей',
+                    'Контроль экранного времени: Женя - 2ч, Вася - 1ч'
+                ]},
+                { section: 'Вечер', tasks: [
+                    'Ужин',
+                    'Уборка туалета за кошкой, проверить корм',
+                    'Стирка и глажка постельного белья',
+                    'Смена постельного белья детям',
+                    'Проверить комнату Жени (чистота, порядок)',
+                    '21:00-21:30 - Уложить детей (не строго)'
+                ]}
+            ]],
+            ['ВОСКРЕСЕНЬЕ 26 ОКТЯБРЯ (выходной)', [
+                { section: 'День', tasks: [
+                    'Завтрак',
+                    'Проверить д/з',
+                    'Обед',
+                    'Дневной сон Васи',
+                    'Час ребёнка с Женей',
+                    'Упражнение УГОЛОК',
+                    'Ужин'
+                ]},
+                { section: 'Подготовка к понедельнику', tasks: [
+                    'Уборка туалета за кошкой',
+                    'Стирка постельного белья',
+                    'Смена белья детям',
+                    '21:00 - Уложить детей (не строго)',
+                    'Подготовить к английскому: сменку, учебные материалы, пенал',
+                    'Проверить д/з по английскому'
+                ]}
+            ]],
+            ['ПОНЕДЕЛЬНИК 27 ОКТЯБРЯ (КАНИКУЛЫ + АНГЛИЙСКИЙ!)', [
+                { section: 'Утро (Ты возишь Васю!)', tasks: [
+                    'Завтрак',
+                    '9:00 - ТЫ отвозишь Васю в садик (день 1)',
+                    '10:34 - Выехать на анализы (30 мин дороги)',
+                    '11:04 - Анализы в ГБУЗ (Твардовского, 5 к.4)'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Обед',
+                    '13:50 - Выехать в Вилли Винки (30 мин + за 10 мин)',
+                    '14:15-15:00 - АНГЛИЙСКИЙ',
+                    '15:00 - Забрать Женю',
+                    'Зарядка для глаз в машине',
+                    '16:00 - Покормить Женю (макароны/слайсы/сосиски/наггетсы)',
+                    'Час ребёнка с Женей',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '19:00 - Ужин',
+                    'Упражнение УГОЛОК',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['ВТОРНИК 28 ОКТЯБРЯ (каникулы, английского НЕТ)', [
+                { section: 'Утро', tasks: [
+                    'Завтрак',
+                    '9:00 - ТЫ отвозишь Васю (день 2)'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Свободное время с Женей',
+                    'Обед',
+                    'Час ребёнка',
+                    'Зарядка для глаз',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    'Упражнение УГОЛОК',
+                    'Ужин',
+                    'Проверить родительские чаты',
+                    'Робот-пылесос',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['СРЕДА 29 ОКТЯБРЯ (каникулы + АНГЛИЙСКИЙ!)', [
+                { section: 'Утро', tasks: [
+                    'Завтрак',
+                    '9:00 - ТЫ отвозишь Васю (день 3)'
+                ]},
+                { section: 'Подготовка к Хеллоуин-уроку', tasks: [
+                    '🎃 Подготовить костюмный наряд для Жени',
+                    '🎃 Чёрные туфли на сменку',
+                    'Учебники НЕ нужны (тематический урок)'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Обед',
+                    '13:50 - Выехать в Вилли Винки',
+                    '14:15-15:00 - АНГЛИЙСКИЙ (🎃 Хеллоуин-урок! Костюм!)',
+                    '15:00 - Забрать Женю',
+                    'Зарядка для глаз',
+                    '16:00 - Покормить (макароны/слайсы/сосиски/наггетсы)',
+                    'Час ребёнка',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '19:00 - Ужин',
+                    'Упражнение УГОЛОК',
+                    'Проверить д/з по английскому (делать до понедельника)',
+                    'Робот-пылесос',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['ЧЕТВЕРГ 30 ОКТЯБРЯ (каникулы, можно Хеллоуин!)', [
+                { section: 'Утро', tasks: [
+                    'Завтрак',
+                    '9:00 - ТЫ отвозишь Васю (день 4)'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Свободное время с Женей',
+                    'Обед',
+                    'Час ребёнка',
+                    'Зарядка для глаз',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '18:55 - Приехать домой',
+                    'Упражнение УГОЛОК',
+                    'Стирка',
+                    'Уборка туалета за кошкой',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['ПЯТНИЦА 31 ОКТЯБРЯ (каникулы, Хеллоуин)', [
+                { section: 'Утро', tasks: [
+                    'Завтрак',
+                    '9:00 - ТЫ отвозишь Васю (день 5, последний!)'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Свободное время',
+                    'Обед',
+                    'Час ребёнка с каждой девочкой',
+                    'Зарядка для глаз',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '18:55 - Приехать домой',
+                    'Упражнение УГОЛОК',
+                    'Вызов клининга',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['СУББОТА 1 НОЯБРЯ (выходные)', [
+                { section: 'День', tasks: [
+                    'Завтрак',
+                    'Обед',
+                    'Дневной сон Васи (нет садика!)',
+                    'Час ребёнка с детьми',
+                    'Зарядка для глаз',
+                    'Упражнение УГОЛОК'
+                ]},
+                { section: 'Вечер', tasks: [
+                    'Ужин',
+                    'Стирка детских вещей и постельного',
+                    'Смена белья детям',
+                    'Проверить комнату Жени',
+                    'Уборка туалета за кошкой',
+                    '21:00 - Уложить детей (не строго)'
+                ]}
+            ]],
+            ['ВОСКРЕСЕНЬЕ 2 НОЯБРЯ (выходной)', [
+                { section: 'День', tasks: [
+                    'Завтрак',
+                    'Обед',
+                    'Дневной сон Васи',
+                    'Час ребёнка',
+                    'Зарядка для глаз',
+                    'Упражнение УГОЛОК',
+                    'Ужин',
+                    'Проверить комнату Жени',
+                    'Уборка туалета за кошкой',
+                    '21:00 - Уложить детей (не строго)'
+                ]},
+                { section: 'Подготовка к понедельнику', tasks: [
+                    'Постирать и погладить школьную форму',
+                    'Подготовить чистое бельё',
+                    'Заплести косичку Жене',
+                    'Проверить рюкзак',
+                    'Купить продукты на неделю',
+                    'Подготовить материалы для Недели русской культуры (10-14 ноября)'
+                ]}
+            ]],
+            ['ПОНЕДЕЛЬНИК 3 НОЯБРЯ (ШКОЛА возобновляется + АНГЛИЙСКИЙ!)', [
+                { section: 'Утро', tasks: [
+                    '6:30 - Подъём и сборы',
+                    'Подготовить чай сладкий и перекус (яблоко/йогурт/сырники)',
+                    '6:45 - Динара забирает Женю',
+                    '9:00 - Полина отвозит Васю в садик'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Стирка',
+                    'Робот-пылесос',
+                    'Проверить чаты о Неделе культуры',
+                    '13:50 - Выехать в Вилли Винки',
+                    '14:15-15:00 - АНГЛИЙСКИЙ',
+                    '15:00 - Забрать Женю',
+                    'Зарядка + Вопрос дня',
+                    '16:00 - Покормить (макароны/слайсы/сосиски/наггетсы)',
+                    'Час ребёнка',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '18:55 - Приехать домой',
+                    'Упражнение УГОЛОК',
+                    'Подготовка к вторнику: учебник окружающего мира',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['ВТОРНИК 4 НОЯБРЯ (учебный день)', [
+                { section: 'Утро', tasks: [
+                    '6:30 - Подъём',
+                    'Подготовить чай сладкий и перекус (яблоко/йогурт/сырники)',
+                    '6:45 - Динара забирает Женю',
+                    '9:00 - Полина отвозит Васю'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Стирка',
+                    'Робот-пылесос',
+                    'Проверить чаты',
+                    '16:00 - Выехать к школе',
+                    '16:30 - Позвонить Елене Владимировне',
+                    '16:45 - Забрать Женю',
+                    'Зарядка + Вопрос дня',
+                    '17:15 - Покормить (макароны/слайсы/сосиски/наггетсы)',
+                    'Час ребёнка',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '19:00 - Ужин',
+                    'Упражнение УГОЛОК',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['СРЕДА 5 НОЯБРЯ (учебный день + АНГЛИЙСКИЙ!)', [
+                { section: 'Утро', tasks: [
+                    '6:30 - Подъём',
+                    'Подготовить чай сладкий и перекус (яблоко/йогурт/сырники)',
+                    '6:45 - Динара забирает Женю Женю',
+                    '9:00 - Отвезти Васю'
+                ]},
+                { section: 'День/Вечер', tasks: [
+                    'Проверить чаты (ДР, события)',
+                    'Стирка',
+                    '13:50 - Выехать в Вилли Винки',
+                    '14:15-15:00 - АНГЛИЙСКИЙ',
+                    '15:00 - Забрать Женю',
+                    'Зарядка + Вопрос дня',
+                    '16:00 - Покормить (макароны/слайсы/сосиски/наггетсы)',
+                    'Час ребёнка',
+                    '17:45 - Выехать в садик',
+                    '18:20 - Забрать Васю',
+                    '18:55 - Приехать домой',
+                    'Проверить д/з по английскому (делать до понедельника)',
+                    'Упражнение УГОЛОК',
+                    '21:00 - Уложить детей'
+                ]}
+            ]],
+            ['СРОЧНЫЕ ПОКУПКИ (до 25.10!)', [
+                { section: 'Канцелярия', tasks: [
+                    'Маркер для доски - 5 шт (1 шт в школу СРОЧНО!, 4 шт запас)',
+                    'Ручки - 2 шт (запас)',
+                    'Карандаши - 3 шт (1→пенал англ, 2→запас)',
+                    'Стержни для карандашей',
+                    'Цветные карандаши - 1 уп (→пенал англ)'
+                ]}
+            ]],
+            ['🛒 СПИСОК ПОКУПОК НА НЕДЕЛЮ (Начало 23.10 и 2.11)', [
+                { section: 'Для Жени (перекусы)', tasks: [
+                    'Яблоки', 'Йогурты (натуральные)', 'Сырники (готовые или сделать)', 'Чай (для сладкого чая)'
+                ]},
+                { section: 'Для обедов Жени', tasks: [
+                    'Макароны', 'Сыр (для макарон с сыром)', 'Слайсы из индейки', 'Сосиски (качественные детские)', 'Куриные наггетсы'
+                ]},
+                { section: 'Основные продукты', tasks: [
+                    'Хлеб', 'Молоко', 'Яйца', 'Масло сливочное', 'Овощи (огурцы, помидоры, морковь)', 'Фрукты (бананы, груши)',
+                    'Курица/мясо для семейных обедов/ужинов', 'Крупы (гречка, рис)'
+                ]},
+                { section: 'Для кошки/Бытовое', tasks: [
+                    'Корм для кошки', 'Туалетная бумага', 'Бумажные полотенца', 'Средства для уборки'
+                ]}
+            ]]
+        ];
+
+        // 2. Функция для создания начальных задач в Firestore
+        async function setupInitialTasks() {
+            if (initialTasksLoaded) return;
+            initialTasksLoaded = true;
+
+            const tasksSnapshot = await getDocs(query(tasksRef(userId)));
+
+            if (tasksSnapshot.empty) {
+                console.log("No tasks found. Setting up initial plan.");
+                const batch = writeBatch(db);
+                let taskIndex = 0;
+
+                taskPlan.forEach(([day, sections]) => {
+                    sections.forEach(({ section, tasks }) => {
+                        tasks.forEach(taskText => {
+                            // Генерация более уникального ID, чтобы избежать дубликатов при изменении плана
+                            const baseId = day.replace(/[^a-zA-Zа-яА-Я0-9]/g, '');
+                            const textHash = taskText.substring(0, 10).replace(/[^a-zA-Zа-яА-Я0-9]/g, '');
+                            const taskId = `${baseId}_${textHash}_${taskIndex++}`;
+                            
+                            const taskDocRef = doc(tasksRef(userId), taskId);
+                            const taskData = {
+                                day: day,
+                                section: section,
+                                text: taskText,
+                                completed: false,
+                                timeSpent: '', // String for minutes/hours
+                                comment: '',
+                                order: taskIndex,
+                                createdAt: new Date().toISOString()
+                            };
+                            batch.set(taskDocRef, taskData);
+                        });
+                    });
+                });
+
+                try {
+                    await batch.commit();
+                    console.log("Initial plan committed to Firestore.");
+                } catch (error) {
+                    console.error("Error writing batch: ", error);
+                }
+            } else {
+                console.log("Tasks already exist in Firestore.");
+            }
+        }
+
+        // 3. Функция для обновления одной задачи
+        async function updateTask(taskId, field, value) {
+            if (!userId) {
+                console.warn("User ID not available yet. Cannot save data.");
+                return;
+            }
+
+            const taskDocRef = doc(tasksRef(userId), taskId);
+            const dataToUpdate = {};
+            dataToUpdate[field] = value;
+
+            try {
+                // Принудительно вызываем resize для textarea, если обновляем комментарий программно
+                if (field === 'comment') {
+                    requestAnimationFrame(() => {
+                        const textarea = document.getElementById(`comment-${taskId}`);
+                        if (textarea) {
+                            autoResizeTextarea({ target: textarea });
+                        }
+                    });
+                }
+                await updateDoc(taskDocRef, dataToUpdate);
+                console.log(`Task ${taskId} updated: ${field} = ${value}`);
+            } catch (error) {
+                console.error("Error updating task: ", error);
+            }
+        }
+
+        // 4. Реализация onSnapshot для обновления UI в реальном времени
+        function setupRealtimeListener() {
+            if (!userId) {
+                console.error("Cannot set up listener: userId is null.");
+                return;
+            }
+
+            const q = query(tasksRef(userId), orderBy('order', 'asc'));
+
+            onSnapshot(q, (snapshot) => {
+                const tasks = [];
+                snapshot.forEach(doc => {
+                    tasks.push({ id: doc.id, ...doc.data() });
+                });
+                renderTasks(tasks);
+            }, (error) => {
+                console.error("Error getting tasks snapshot: ", error);
+            });
+        }
+
+        // 5. Функция для рендеринга задач
+        function renderTasks(tasks) {
+            const container = document.getElementById('task-container');
+            if (!container) return;
+
+            // Группировка задач по дню
+            const groupedTasks = tasks.reduce((acc, task) => {
+                if (!acc[task.day]) {
+                    acc[task.day] = {};
+                }
+                if (!acc[task.day][task.section]) {
+                    acc[task.day][task.section] = [];
+                }
+                acc[task.day][task.section].push(task);
+                return acc;
+            }, {});
+
+            let html = '';
+
+            for (const day in groupedTasks) {
+                html += `
+                    <div class="mb-8 p-4 bg-white rounded-xl shadow-lg">
+                        <h2 class="text-2xl font-extrabold text-indigo-700 mb-4 border-b-2 border-indigo-100 pb-2">${day}</h2>
+                `;
+                const sections = groupedTasks[day];
+                for (const section in sections) {
+                    html += `
+                        <h3 class="text-lg font-semibold text-gray-700 mt-6 mb-3 px-2 py-1 bg-gray-50 rounded-lg">${section}</h3>
+                        <div class="space-y-3">
+                    `;
+                    sections[section].forEach(task => {
+                        html += generateTaskCard(task);
+                    });
+                    html += `</div>`;
+                }
+                html += `</div>`;
+            }
+
+            container.innerHTML = html;
+            attachEventListeners();
+        }
+
+        // 6. Генерация HTML для одной карточки задачи
+        function generateTaskCard(task) {
+            const isCompleted = task.completed;
+            const cardClass = isCompleted ? 'completed shadow-lg' : 'shadow-md hover:shadow-lg';
+            const checkboxChecked = isCompleted ? 'checked' : '';
+
+            return `
+                <div id="task-${task.id}" class="task-card flex flex-col p-4 rounded-xl border border-gray-200 ${cardClass}">
+                    <!-- Заголовок и чекбокс -->
+                    <div class="flex items-start mb-2">
+                        <input type="checkbox" id="check-${task.id}" data-task-id="${task.id}" data-field="completed" ${checkboxChecked}
+                               class="task-input checkbox-large h-6 w-6 text-emerald-600 rounded border-gray-300 focus:ring-emerald-500 mr-3 mt-1"
+                               style="min-width: 1.5rem;">
+                        <label for="check-${task.id}" class="task-text text-base font-medium text-gray-900 flex-1 break-words">
+                            ${task.text}
+                        </label>
+                    </div>
+
+                    <!-- Детали (Время и Комментарий) -->
+                    <div class="flex flex-col sm:flex-row sm:space-x-4 mt-2 pt-2 border-t border-gray-100">
+                        <!-- Время -->
+                        <div class="w-full sm:w-1/3 mb-3 sm:mb-0">
+                            <label for="time-${task.id}" class="block text-xs font-medium text-gray-500 mb-1">
+                                Затрачено времени (мин/ч)
+                            </label>
+                            <input type="text" id="time-${task.id}" data-task-id="${task.id}" data-field="timeSpent" value="${task.timeSpent || ''}" placeholder="30 мин / 1 ч"
+                                   class="task-input time-input w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500">
+                        </div>
+
+                        <!-- Комментарий -->
+                        <div class="w-full sm:flex-1">
+                            <label for="comment-${task.id}" class="block text-xs font-medium text-gray-500 mb-1">
+                                Комментарий
+                            </label>
+                            <textarea id="comment-${task.id}" data-task-id="${task.id}" data-field="comment" rows="2" placeholder="Ваши заметки..."
+                                      class="task-input comment-input w-full p-2 border border-gray-300 rounded-lg text-sm focus:ring-indigo-500 focus:border-indigo-500 resize-none">${task.comment || ''}</textarea>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // 7. Назначение обработчиков событий
+        function attachEventListeners() {
+            document.querySelectorAll('.task-input').forEach(input => {
+                const taskId = input.dataset.taskId;
+                const field = input.dataset.field;
+
+                if (input.type === 'checkbox') {
+                    input.onchange = (e) => {
+                        updateTask(taskId, field, e.target.checked);
+                    };
+                } else if (input.tagName === 'TEXTAREA' || input.type === 'text') {
+                    // Используем onblur для сохранения текста и времени, чтобы не спамить базу данных при каждом нажатии клавиши
+                    input.onblur = (e) => {
+                        updateTask(taskId, field, e.target.value.trim());
+                    };
+                    // Дополнительно: автоматическое изменение высоты textarea
+                    if (input.tagName === 'TEXTAREA') {
+                        input.addEventListener('input', autoResizeTextarea);
+                        autoResizeTextarea({ target: input }); // Первоначальная настройка высоты
+                    }
+                }
+            });
+        }
+
+        function autoResizeTextarea(e) {
+            const textarea = e.target;
+            textarea.style.height = 'auto'; // Сброс высоты
+            // Используем scrollHeight для установки новой высоты
+            const newHeight = textarea.scrollHeight;
+            textarea.style.height = (newHeight) + 'px'; // Установка новой высоты
+        }
+
+        // Запуск приложения
+        window.onload = initFirebase;
+    </script>
+</head>
+<body>
+    <div class="min-h-screen p-4 sm:p-6 max-w-4xl mx-auto">
+        <header class="mb-8">
+            <div class="flex justify-between items-center bg-indigo-600 p-4 rounded-xl shadow-xl">
+                <h1 class="text-3xl font-bold text-white">План 2-х Недель</h1>
+                <div class="text-sm font-medium text-indigo-200">
+                    <p>Состояние</p>
+                    <p id="user-id-display" class="text-white text-xs mt-1 break-all">ID: Загрузка...</p>
+                </div>
+            </div>
+        </header>
+
+        <main id="task-container" class="space-y-6">
+            <!-- Задачи будут загружены сюда -->
+            <div class="text-center p-12 text-gray-500">
+                <svg class="mx-auto h-12 w-12 text-gray-400 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p class="mt-4">Загрузка плана...</p>
+                <p class="text-xs text-gray-400 mt-1">Инициализация базы данных (Firestore)</p>
+            </div>
+        </main>
+
+        <footer class="mt-12 text-center text-xs text-gray-400 p-4 border-t border-gray-200">
+            <p>Ваши данные сохраняются в облаке (Firestore) в реальном времени.</p>
+        </footer>
+    </div>
+</body>
+</html>
