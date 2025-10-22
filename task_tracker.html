@@ -43,8 +43,24 @@
         // Настройки логирования (для отладки)
         setLogLevel('Debug');
 
+        // ====================================================================
+        // 🚨 ВСТАВЬТЕ СЮДА ВАШУ КОНФИГУРАЦИЮ FIREBASE (ОБЯЗАТЕЛЬНО ДЛЯ GH PAGES)
+        // Если вы видите ошибку "Конфигурация Firebase отсутствует", замените
+        // значение null на объект вашей конфигурации.
+        // Пример: const USER_FIREBASE_CONFIG = { apiKey: "...", authDomain: "...", ... };
+        const USER_FIREBASE_CONFIG = {
+        apiKey: "AIzaSyBxFPIcvjRtO6aV82UKwcDbE89e-_a3chI",
+        authDomain: "w-tasks.firebaseapp.com",
+        projectId: "w-tasks",
+        storageBucket: "w-tasks.firebasestorage.app",
+        messagingSenderId: "648934004165",
+        appId: "1:648934004165:web:832570527f4f7f689e27ac"
+        };
+        // ====================================================================
+
         // Глобальные переменные Canvas (ОБЯЗАТЕЛЬНЫ К ИСПОЛЬЗОВАНИЮ)
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        // Проверяем, если переменные Canvas доступны, используем их, иначе используем USER_FIREBASE_CONFIG
+        const firebaseConfig = USER_FIREBASE_CONFIG || (typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null);
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         appId = typeof __app_id !== 'undefined' ? __app_id : 'default-task-app';
 
@@ -61,14 +77,15 @@
             updateLoaderText('Инициализация Firebase...');
 
             if (!firebaseConfig) {
-                console.error("Firebase config is missing!");
-                updateLoaderText('Ошибка: Конфигурация Firebase отсутствует.');
+                console.error("Firebase config is missing! User must provide configuration.");
+                updateLoaderText('Ошибка: Конфигурация Firebase отсутствует. Пожалуйста, вставьте настройки Firebase в код.');
                 return;
             }
 
             const app = initializeApp(firebaseConfig);
             db = getFirestore(app);
             auth = getAuth(app);
+            // Используем 'default-task-app' как часть пути, если appId не определен
             tasksRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'task_list');
 
             onAuthStateChanged(auth, async (user) => {
@@ -461,7 +478,7 @@
             updateLoaderText('Проверка существующих задач...');
 
             // Используем query для проверки наличия документов
-            const q = query(tasksRef(userId));
+            const q = query(tasksRef(userId), orderBy('order', 'asc')); // Используем orderBy для правильного порядка в onSnapshot
             const tasksSnapshot = await getDocs(q);
 
             if (tasksSnapshot.empty) {
